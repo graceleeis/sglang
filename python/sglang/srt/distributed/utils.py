@@ -67,6 +67,22 @@ def get_pp_indices(
     If the number of layers is not divisible by the number of partitions,
     the last partition will have the remaining layers.
     """
+    # HACK: For testing purposes, allow loading only a subset of layers
+    test_num_layers_str = os.getenv("SGLANG_TEST_NUM_LAYERS", None)
+    if test_num_layers_str is not None:
+        try:
+            test_num_layers = int(test_num_layers_str)
+            if test_num_layers > 0 and test_num_layers < num_hidden_layers:
+                print(
+                    f"[HACK] Loading only {test_num_layers} layers out of {num_hidden_layers} for testing"
+                )
+                # Override num_hidden_layers for testing
+                num_hidden_layers = test_num_layers
+        except ValueError:
+            print(
+                f"[HACK] Invalid SGLANG_TEST_NUM_LAYERS value: {test_num_layers_str}, ignoring"
+            )
+
     # partition_list_str can be set to None in sglang
     partition_list_str = os.getenv("SGLANG_PP_LAYER_PARTITION", None)
     if partition_list_str is not None:
