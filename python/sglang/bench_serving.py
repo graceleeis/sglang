@@ -610,11 +610,13 @@ async def async_request_gserver(
     raise NotImplementedError()
 
 
-async def async_request_profile(api_url: str) -> RequestFuncOutput:
+async def async_request_profile(
+    api_url: str, json_payload: Optional[Dict[str, Any]] = None
+) -> RequestFuncOutput:
     async with _create_bench_client_session() as session:
         output = RequestFuncOutput()
         try:
-            async with session.post(url=api_url) as response:
+            async with session.post(url=api_url, json=json_payload) as response:
                 if response.status == 200:
                     output.success = True
                 else:
@@ -647,7 +649,11 @@ def _build_profile_urls(
     return profile_urls
 
 
-async def _call_profile_pd(profile_urls: List[Tuple[str, str]], mode: str) -> None:
+async def _call_profile_pd(
+    profile_urls: List[Tuple[str, str]],
+    mode: str,
+    profile_payload: Optional[Dict[str, Any]] = None,
+) -> None:
     """Call profile endpoint (start/stop) on PD separated workers.
 
     Args:
@@ -661,7 +667,10 @@ async def _call_profile_pd(profile_urls: List[Tuple[str, str]], mode: str) -> No
     print(f"{action} profiler...")
 
     for worker_type, url in profile_urls:
-        profile_output = await async_request_profile(api_url=url + endpoint)
+        json_payload = profile_payload if mode == "start" else None
+        profile_output = await async_request_profile(
+            api_url=url + endpoint, json_payload=json_payload
+        )
         if profile_output.success:
             print(f"Profiler {action_past} for {worker_type} worker at {url}")
         else:
@@ -1841,6 +1850,11 @@ async def benchmark(
 
     # Build profile URLs for PD separated mode (do this once at the beginning)
     pd_profile_urls = []
+    profile_payload: Optional[Dict[str, Any]] = None
+    if profile and getattr(args, "decoding", False):
+        profile_payload = {"profile_by_stage": True, "stages": ["decode"]}
+        print("Profiling decode stage only (--decoding).")
+
     if profile and pd_separated:
         pd_profile_urls = _build_profile_urls(profile_prefill_url, profile_decode_url)
         if not pd_profile_urls:
@@ -1853,11 +1867,13 @@ async def benchmark(
     if profile:
         if pd_separated:
             if pd_profile_urls:
-                await _call_profile_pd(pd_profile_urls, "start")
+                await _call_profile_pd(
+                    pd_profile_urls, "start", profile_payload=profile_payload
+                )
         else:
             print("Starting profiler...")
             profile_output = await async_request_profile(
-                api_url=base_url + "/start_profile"
+                api_url=base_url + "/start_profile", json_payload=profile_payload
             )
             if profile_output.success:
                 print("Profiler started")
@@ -2158,6 +2174,10 @@ def run_benchmark(args_: argparse.Namespace):
 
     if not hasattr(args, "mooncake_num_rounds"):
         args.mooncake_num_rounds = 1
+
+    if getattr(args, "decoding", False) and not args.profile:
+        print("--decoding requires --profile.")
+        sys.exit(1)
 
     print(f"benchmark_args={args}")
 
@@ -2508,6 +2528,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
         "SGLANG_TORCH_PROFILER_DIR to enable profiler.",
+    )
+    parser.add_argument(
+        "--decoding",
+        action="store_true",
+        help="Profile decode stage only. Requires --profile.",
     )
     parser.add_argument(
         "--lora-name",

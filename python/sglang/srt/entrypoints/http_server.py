@@ -649,7 +649,14 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
         record_shapes=obj.record_shapes,
         profile_by_stage=obj.profile_by_stage,
         merge_profiles=obj.merge_profiles,
+        stages=obj.stages,
     )
+    if obj.stages:
+        logger.info(
+            "Received start_profile request with stages=%s profile_by_stage=%s",
+            obj.stages,
+            obj.profile_by_stage,
+        )
     return Response(
         content="Start profiling.\n",
         status_code=200,

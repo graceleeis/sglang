@@ -42,6 +42,8 @@ class SchedulerProfilerMixin:
         self.profile_in_progress: bool = False
         self.rpd_profiler = None
         self.merge_profiles = False
+        self.profile_include_prefill: bool = True
+        self.profile_include_decode: bool = True
 
     def init_profile(
         self,
@@ -54,6 +56,7 @@ class SchedulerProfilerMixin:
         profile_by_stage: bool,
         profile_id: str,
         merge_profiles: bool = False,
+        profile_target_stages: Optional[List[str]] = None,
     ) -> ProfileReqOutput:
         if self.profile_in_progress:
             return ProfileReqOutput(
@@ -63,6 +66,44 @@ class SchedulerProfilerMixin:
 
         self.profile_by_stage = profile_by_stage
         self.merge_profiles = merge_profiles
+        self.profile_include_prefill = True
+        self.profile_include_decode = True
+
+        if profile_target_stages:
+            include_prefill = False
+            include_decode = False
+            for stage in profile_target_stages:
+                if stage is None:
+                    continue
+                normalized = stage.strip().lower()
+                if normalized in (
+                    "prefill",
+                    "extend",
+                    "prefill_only",
+                    "extend_only",
+                ):
+                    include_prefill = True
+                elif normalized in ("decode", "decoding"):
+                    include_decode = True
+                else:
+                    logger.warning(
+                        "Unknown profile stage '%s'; supported stages are 'prefill' and 'decode'.",
+                        stage,
+                    )
+            if include_prefill or include_decode:
+                self.profile_include_prefill = include_prefill
+                self.profile_include_decode = include_decode or not include_prefill
+                logger.info(
+                    "Profiler stage filter resolved to prefill=%s decode=%s (requested=%s)",
+                    self.profile_include_prefill,
+                    self.profile_include_decode,
+                    profile_target_stages,
+                )
+            else:
+                logger.warning(
+                    "Profiler stage filter %s did not include supported stages; profiling all stages.",
+                    profile_target_stages,
+                )
 
         if output_dir is None:
             output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
@@ -94,6 +135,11 @@ class SchedulerProfilerMixin:
             # The caller will be notified when reaching profiler_target_forward_ct
         else:
             self.profiler_target_forward_ct = None
+            if self.profile_by_stage:
+                self.profiler_prefill_ct = 0
+                self.profiler_decode_ct = 0
+                self.profiler_target_prefill_ct = None
+                self.profiler_target_decode_ct = None
 
         return ProfileReqOutput(success=True, message="Succeeded")
 
@@ -275,26 +321,38 @@ class SchedulerProfilerMixin:
         self.torch_profiler = None
         self.profile_in_progress = False
         self.profiler_start_forward_ct = None
+        self.profile_include_prefill = True
+        self.profile_include_decode = True
 
         return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
 
     def _profile_batch_predicate(self, batch):
         if self.profile_by_stage:
-            if batch.forward_mode.is_prefill():
+            if batch.forward_mode.is_prefill() or batch.forward_mode.is_split_prefill():
+                if not self.profile_include_prefill:
+                    return
                 if self.profiler_prefill_ct == 0:
                     self.start_profile(batch.forward_mode)
                 self.profiler_prefill_ct += 1
-                if self.profiler_prefill_ct > self.profiler_target_prefill_ct:
+                if (
+                    self.profiler_target_prefill_ct is not None
+                    and self.profiler_prefill_ct > self.profiler_target_prefill_ct
+                ):
                     if self.profile_in_progress:
                         self.stop_profile(stage=ForwardMode.EXTEND)
             elif batch.forward_mode.is_decode():
+                if not self.profile_include_decode:
+                    return
                 if self.profiler_decode_ct == 0:
                     if self.profile_in_progress:
                         # force trace flush
                         self.stop_profile(stage=ForwardMode.EXTEND)
                     self.start_profile(batch.forward_mode)
                 self.profiler_decode_ct += 1
-                if self.profiler_decode_ct > self.profiler_target_decode_ct:
+                if (
+                    self.profiler_target_decode_ct is not None
+                    and self.profiler_decode_ct > self.profiler_target_decode_ct
+                ):
                     if self.profile_in_progress:
                         self.stop_profile(stage=ForwardMode.DECODE)
             elif batch.forward_mode.is_idle():
@@ -327,6 +385,7 @@ class SchedulerProfilerMixin:
                     recv_req.profile_by_stage,
                     recv_req.profile_id,
                     recv_req.merge_profiles,
+                    recv_req.stages,
                 )
             else:
                 self.init_profile(
@@ -339,6 +398,7 @@ class SchedulerProfilerMixin:
                     recv_req.profile_by_stage,
                     recv_req.profile_id,
                     recv_req.merge_profiles,
+                    recv_req.stages,
                 )
                 return self.start_profile()
         else:
